@@ -1,0 +1,216 @@
+---
+- hosts: lxcprod
+  gather_facts: yes
+  become: yes
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Créer une VM LXC
+      community.general.lxd_container:
+        name: "{{ domain | regex_replace('\\.|-|_', '') }}"
+        type: virtual-machine
+        state: started
+        source:
+          type: image
+          mode: pull
+          server: https://cloud-images.ubuntu.com/releases
+          protocol: simplestreams
+          alias: "{{ container_image }}"
+        profiles: "{{ container_profiles }}"
+        wait_for_ipv4_addresses: true
+        timeout: 600
+      register: container_result
+
+    - name: Afficher le résultat de la création de la VM
+      debug:
+        var: container_result
+
+    - name: Récupérer l'adresse IPv4 de la VM
+      set_fact:
+        container_ip: "{{ container_result.addresses.enp5s0[0] }}"
+
+    - name: Créer le fichier de configuration Nginx sans SSL
+      copy:
+        dest: /etc/nginx/sites-available/{{ domain }}.conf
+        content: |
+          server {
+              server_name {{ domain }} www.{{ domain }};
+
+              location / {
+                  proxy_pass http://{{ container_ip }}:80;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+
+                  add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+                  add_header X-Content-Security-Policy "default-src 'self'; img-src *; media-src * data:;" always;
+
+                  proxy_pass_header Strict-Transport-Security;
+                  proxy_pass_header Content-Security-Policy;
+                  proxy_pass_header X-Content-Security-Policy;
+                  proxy_pass_header Access-Control-Allow-Methods;
+                  proxy_pass_header Access-Control-Allow-Headers;
+                  proxy_pass_header Cross-Origin-Embedder-Policy;
+                  proxy_pass_header Cross-Origin-Embedder-Policy-Report-Only;
+                  proxy_pass_header Cross-Origin-Opener-Policy;
+                  proxy_pass_header Cross-Origin-Opener-Policy-Report-Only;
+                  proxy_pass_header Cross-Origin-Resource-Policy;
+                  proxy_pass_header Permissions-Policy;
+                  proxy_pass_header Referrer-Policy;
+                  proxy_pass_header X-Content-Type-Options;
+                  proxy_pass_header X-Frame-Options;
+                  proxy_pass_header X-Permitted-Cross-Domain-Policies;
+                  proxy_pass_header Set-Cookie;
+                  proxy_pass_header Cache-Control;
+                  proxy_pass_header Authorization;
+              }
+
+              listen 80;
+              server_name {{ domain }} www.{{ domain }};
+              return 404; 
+          }
+
+    - name: Créer un lien symbolique pour activer le site Nginx
+      file:
+        src: /etc/nginx/sites-available/{{ domain }}.conf
+        dest: /etc/nginx/sites-enabled/{{ domain }}.conf
+        state: link
+
+    - name: Redémarrer Nginx sans SSL
+      service:
+        name: nginx
+        state: restarted
+
+    - name: Installer Certbot et le plugin DNS Cloudflare
+      apt:
+        name: 
+          - certbot
+          - python3-certbot-dns-cloudflare
+        state: latest
+
+    - name: Obtenir un certificat SSL pour le domaine via DNS
+      command: certbot certonly --dns-cloudflare --dns-cloudflare-credentials {{ cloudflare_ini }} --dns-cloudflare-propagation-seconds 60 -d {{ domain }} -d www.{{ domain }} --non-interactive --agree-tos --email {{ letsencrypt_email }}
+      register: certbot_result
+
+    - name: Mettre à jour la configuration de Nginx avec SSL
+      copy:
+        dest: /etc/nginx/sites-available/{{ domain }}.conf
+        content: |
+          server {
+              server_name {{ domain }} www.{{ domain }};
+
+              location / {
+                  proxy_pass http://{{ container_ip }}:80;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+
+                  add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+                  add_header X-Content-Security-Policy "default-src 'self'; img-src *; media-src * data:;" always;
+
+                  proxy_pass_header Strict-Transport-Security;
+                  proxy_pass_header Content-Security-Policy;
+                  proxy_pass_header X-Content-Security-Policy;
+                  proxy_pass_header Access-Control-Allow-Methods;
+                  proxy_pass_header Access-Control-Allow-Headers;
+                  proxy_pass_header Cross-Origin-Embedder-Policy;
+                  proxy_pass_header Cross-Origin-Embedder-Policy-Report-Only;
+                  proxy_pass_header Cross-Origin-Opener-Policy;
+                  proxy_pass_header Cross-Origin-Opener-Policy-Report-Only;
+                  proxy_pass_header Cross-Origin-Resource-Policy;
+                  proxy_pass_header Permissions-Policy;
+                  proxy_pass_header Referrer-Policy;
+                  proxy_pass_header X-Content-Type-Options;
+                  proxy_pass_header X-Frame-Options;
+                  proxy_pass_header X-Permitted-Cross-Domain-Policies;
+                  proxy_pass_header Set-Cookie;
+                  proxy_pass_header Cache-Control;
+                  proxy_pass_header Authorization;
+              }
+
+              listen 443 ssl; 
+              ssl_certificate /etc/letsencrypt/live/{{ domain }}/fullchain.pem; 
+              ssl_certificate_key /etc/letsencrypt/live/{{ domain }}/privkey.pem; 
+              include /etc/letsencrypt/options-ssl-nginx.conf; 
+              ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; 
+          }
+          server {
+              if ($host = www.{{ domain }}) {
+                  return 301 https://$host$request_uri;
+              } 
+
+              if ($host = {{ domain }}) {
+                  return 301 https://$host$request_uri;
+              } 
+
+              listen 80;
+              server_name {{ domain }} www.{{ domain }};
+              return 404; 
+          }
+
+    - name: Redémarrer Nginx avec SSL
+      service:
+        name: nginx
+        state: restarted
+
+- hosts: localhost
+  gather_facts: no
+  become: yes
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Exporter la base de données WordPress
+      command: "wp --allow-root db export {{ wordpress_path }}/db_{{ domain }}.sql --allow-root"
+      args:
+        chdir: "{{ wordpress_path }}"
+      register: db_export
+      ignore_errors: yes
+
+    - name: Vérifier l'export de la base de données
+      fail:
+        msg: "L'export de la base de données a échoué."
+      when: db_export.failed
+
+    - name: Créer une archive du site WordPress
+      archive:
+        path: "{{ wordpress_path }}"
+        dest: "{{ wordpress_path }}/site_backup_{{ domain }}.tar.gz"
+        exclude_path:
+          - "{{ wordpress_path }}/site_backup_{{ domain }}.tar.gz"
+          - "{{ wordpress_path }}/db_{{ domain }}.sql"
+      register: archive_result
+      ignore_errors: yes
+
+    - name: Vérifier la création de l'archive du site
+      fail:
+        msg: "La création de l'archive du site a échoué."
+      when: archive_result.failed
+
+    - name: Transférer l'archive vers le serveur distant
+      command: >
+        rsync -avz -e "ssh -i {{ ssh_key }}" 
+        {{ wordpress_path }}/site_backup_{{ domain }}.tar.gz 
+        {{ remote_user }}@{{ remote_server }}:{{ remote_path }}
+      register: transfer_result
+      ignore_errors: yes
+
+    - name: Vérifier le transfert de l'archive
+      fail:
+        msg: "Le transfert de l'archive vers le serveur distant a échoué."
+      when: transfer_result.failed
+
+    - name: Supprimer le fichier de sauvegarde de la base de données
+      file:
+        path: "{{ wordpress_path }}/db_{{ domain }}.sql"
+        state: absent
+
+    - name: Supprimer l'archive du site
+      file:
+        path: "{{ wordpress_path }}/site_backup_{{ domain }}.tar.gz"
+        state: absent
+
+    - name: Afficher le succès de la sauvegarde
+      debug:
+        msg: "La sauvegarde et le transfert ont été effectués avec succès."
