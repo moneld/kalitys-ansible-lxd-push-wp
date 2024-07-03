@@ -1,0 +1,10 @@
+domain: "francelogis.fr"
+container_image: "24.04"
+container_profiles: ["default","ssh-key-profile"]
+wordpress_path: "/var/www/dev/francelogis.fr"
+remote_server: "162.19.43.86"
+remote_path: "/tmp"
+remote_user: "ubuntu"
+ssh_key: "/root/.ssh/kalmanager"
+letsencrypt_email: "deploy@clab-developpement.fr"
+cloudflare_ini: "/root/cloudflare.ini"
